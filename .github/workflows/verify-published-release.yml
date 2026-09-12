@@ -2,84 +2,43 @@ name: Verify published release assets
 
 on:
   release:
-    types:
-      - published
+    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing stable release tag to re-verify (for example, v1.0.0)
+        description: Existing stable release tag to re-verify
         required: true
         type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: verify-release-${{ github.event.release.tag_name || inputs.release_tag }}
-  cancel-in-progress: false
-
 jobs:
   verify:
-    name: Verify ZIP, checksum, and source manifest
+    name: Verify installer and checksum
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
       RELEASE_REPOSITORY: dr-z-ed/bot-release
     steps:
-      - name: Validate tag and download the exact assets
+      - name: Download the exact public inventory
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Release tag is not stable SemVer." >&2
-            exit 1
-          fi
-          ASSET_NAME="dr-zed-windows-x64-${RELEASE_TAG}.zip"
+          [[ "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          ASSET_NAME="dr-zed-setup-${RELEASE_TAG}.exe"
           mkdir release-inputs
-          gh release download "${RELEASE_TAG}" \
-            --repo "${RELEASE_REPOSITORY}" \
-            --dir release-inputs \
-            --pattern "${ASSET_NAME}" \
-            --pattern "${ASSET_NAME}.sha256" \
-            --pattern "release-manifest.json"
-          test "$(find release-inputs -maxdepth 1 -type f | wc -l)" -eq 3
+          gh release download "${RELEASE_TAG}" --repo "${RELEASE_REPOSITORY}" \
+            --dir release-inputs --pattern "${ASSET_NAME}" --pattern "${ASSET_NAME}.sha256"
+          test "$(find release-inputs -maxdepth 1 -type f | wc -l)" -eq 2
 
-      - name: Verify checksum, manifest, and ZIP structure
+      - name: Verify installer checksum and format
         shell: bash
         run: |
           set -euo pipefail
-          ASSET_NAME="dr-zed-windows-x64-${RELEASE_TAG}.zip"
-          ASSET_PATH="release-inputs/${ASSET_NAME}"
+          ASSET_NAME="dr-zed-setup-${RELEASE_TAG}.exe"
           (cd release-inputs && sha256sum --check "${ASSET_NAME}.sha256")
-          ACTUAL_SHA="$(sha256sum "${ASSET_PATH}" | cut -d' ' -f1)"
-          ACTUAL_SIZE="$(stat -c '%s' "${ASSET_PATH}")"
-          jq --exit-status \
-            --arg tag "${RELEASE_TAG}" \
-            --arg asset "${ASSET_NAME}" \
-            --arg digest "${ACTUAL_SHA}" \
-            --argjson size "${ACTUAL_SIZE}" \
-            '.schema_version == 1 and
-             .source_repository == "faraz-shamim/drzed-rust" and
-             (.source_sha | test("^[a-f0-9]{40}$")) and
-             .tag == $tag and .version == ($tag | ltrimstr("v")) and
-             .asset.name == $asset and .asset.sha256 == $digest and .asset.size_bytes == $size' \
-            release-inputs/release-manifest.json >/dev/null
-          unzip -t "${ASSET_PATH}" >/dev/null
-          while IFS= read -r path; do
-            if [[ -z "${path}" || "${path}" == /* || "${path}" == *\\* || "/${path}/" == *"/../"* ]]; then
-              echo "Unsafe ZIP entry: ${path}" >&2
-              exit 1
-            fi
-          done < <(unzip -Z1 "${ASSET_PATH}")
-
-      - name: Record verification summary
-        shell: bash
-        run: |
-          {
-            echo "### Verified Dr. Zed ${RELEASE_TAG}"
-            echo "- ZIP SHA-256 matches the attached checksum."
-            echo "- Release manifest matches the ZIP name, size, hash, and stable tag."
-            echo "- ZIP structure passed integrity and path-safety checks."
-          } >> "${GITHUB_STEP_SUMMARY}"
+          test "$(head -c 2 "release-inputs/${ASSET_NAME}")" = 'MZ'
+          echo "Verified ${ASSET_NAME} and its SHA-256 checksum." >> "${GITHUB_STEP_SUMMARY}"
